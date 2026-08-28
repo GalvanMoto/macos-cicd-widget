@@ -35,6 +35,7 @@ public class GitHubAPIService: ObservableObject {
     private var lastObservedRunId: Int?
     private var lastObservedStatus: WorkflowStatus?
     private var lastHandledPushDate: Date?
+    private var hasInitializedPushBaseline: Bool = false
     
     private init() {
         requestNotificationPermission()
@@ -48,7 +49,8 @@ public class GitHubAPIService: ObservableObject {
         stopPolling()
         refresh(settings: settings)
         
-        timer = Timer.scheduledTimer(withTimeInterval: max(8.0, settings.pollIntervalSeconds), repeats: true) { [weak self] _ in
+        // Fast 5-second polling interval for responsive push detection
+        timer = Timer.scheduledTimer(withTimeInterval: max(5.0, settings.pollIntervalSeconds), repeats: true) { [weak self] _ in
             guard let self = self else { return }
             if !settings.isSimulatorEnabled {
                 self.refresh(settings: settings)
@@ -74,10 +76,12 @@ public class GitHubAPIService: ObservableObject {
                     discoveredRuns = runs
                     
                     if let p = pushInfo {
-                        let isNewPush = (self.lastHandledPushDate == nil || p.pushedDate > self.lastHandledPushDate!)
-                        let isFresh = Date().timeIntervalSince(p.pushedDate) < 300
-                        
-                        if isNewPush && isFresh {
+                        if !self.hasInitializedPushBaseline {
+                            // Record baseline push date on first launch
+                            self.lastHandledPushDate = p.pushedDate
+                            self.hasInitializedPushBaseline = true
+                        } else if let lastDate = self.lastHandledPushDate, p.pushedDate > lastDate {
+                            // NEW PUSH DETECTED!
                             self.lastHandledPushDate = p.pushedDate
                             var updatedPush = p
                             updatedPush.displayedAt = Date()
@@ -96,7 +100,7 @@ public class GitHubAPIService: ObservableObject {
                                     updatedPush.ciStatus = .triggering
                                     self.sendNotification(
                                         title: "🚀 Active Push: \(repoShortName)",
-                                        body: "Pushed to \(p.branch) • GitHub Actions triggered"
+                                        body: "Pushed to \(p.branch) • GitHub Actions workflow triggered"
                                     )
                                 } else {
                                     updatedPush.ciStatus = .synced
@@ -372,6 +376,7 @@ public class GitHubAPIService: ObservableObject {
     }
     
     public func sendNotification(title: String, body: String) {
+        // 1. UNUserNotificationCenter
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -380,14 +385,13 @@ public class GitHubAPIService: ObservableObject {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
         
-        // Guaranteed system fallback banner via AppleScript
-        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.launchPath = "/usr/bin/osascript"
-            task.arguments = ["-e", "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""]
-            try? task.run()
+        // 2. NSUserNotificationCenter (direct macOS notification server delivery)
+        DispatchQueue.main.async {
+            let notif = NSUserNotification()
+            notif.title = title
+            notif.informativeText = body
+            notif.soundName = NSUserNotificationDefaultSoundName
+            NSUserNotificationCenter.default.deliver(notif)
         }
     }
     
