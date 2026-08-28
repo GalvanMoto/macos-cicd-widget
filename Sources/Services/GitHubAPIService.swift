@@ -74,7 +74,6 @@ public class GitHubAPIService: ObservableObject {
                     discoveredRuns = runs
                     
                     if let p = pushInfo {
-                        // Only trigger if this is a newly observed push within the last 5 minutes
                         let isNewPush = (self.lastHandledPushDate == nil || p.pushedDate > self.lastHandledPushDate!)
                         let isFresh = Date().timeIntervalSince(p.pushedDate) < 300
                         
@@ -83,15 +82,28 @@ public class GitHubAPIService: ObservableObject {
                             var updatedPush = p
                             updatedPush.displayedAt = Date()
                             
+                            let repoShortName = p.repositoryName.components(separatedBy: "/").last ?? p.repositoryName
                             let parts = p.repositoryName.components(separatedBy: "/")
                             if parts.count == 2 {
                                 let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: token)
                                 if repoRuns == nil {
                                     updatedPush.ciStatus = .noWorkflowConfigured
+                                    self.sendNotification(
+                                        title: "📦 Code Synced: \(repoShortName)",
+                                        body: "Pushed to \(p.branch) • Latest commit is up to date"
+                                    )
                                 } else if repoRuns?.status.isRunning == true {
                                     updatedPush.ciStatus = .triggering
+                                    self.sendNotification(
+                                        title: "🚀 Active Push: \(repoShortName)",
+                                        body: "Pushed to \(p.branch) • GitHub Actions triggered"
+                                    )
                                 } else {
                                     updatedPush.ciStatus = .synced
+                                    self.sendNotification(
+                                        title: "📦 Code Synced: \(repoShortName)",
+                                        body: "Pushed to \(p.branch) • Latest commit is up to date"
+                                    )
                                 }
                             }
                             
@@ -372,11 +384,10 @@ public class GitHubAPIService: ObservableObject {
         let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
         let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
         DispatchQueue.global(qos: .userInitiated).async {
-            let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""
-            var error: NSDictionary?
-            if let appleScript = NSAppleScript(source: script) {
-                appleScript.executeAndReturnError(&error)
-            }
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments = ["-e", "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""]
+            try? task.run()
         }
     }
     
@@ -388,14 +399,15 @@ public class GitHubAPIService: ObservableObject {
         }
         
         if prevId == newRun.id && prevStatus != newRun.status {
+            let repoShort = newRun.repositoryName.components(separatedBy: "/").last ?? newRun.repositoryName
             if newRun.status == .success {
                 sendNotification(
-                    title: "✅ Build Passed: \(newRun.repositoryName)",
+                    title: "✅ Build Passed: \(repoShort)",
                     body: "\(newRun.name) #\(newRun.runNumber) succeeded on \(newRun.branch)"
                 )
             } else if newRun.status == .failure {
                 sendNotification(
-                    title: "❌ Build Failed: \(newRun.repositoryName)",
+                    title: "❌ Build Failed: \(repoShort)",
                     body: "\(newRun.name) #\(newRun.runNumber) failed on \(newRun.branch)"
                 )
             }
