@@ -10,6 +10,8 @@ public class MenuBarController: NSObject {
     private var spinTimer: Timer?
     private var resetToIdleTimer: Timer?
     private var spinAngle: CGFloat = 0
+    private var lastKnownStatus: WorkflowStatus?
+    private var lastKnownRunId: Int?
     
     public func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -57,52 +59,55 @@ public class MenuBarController: NSObject {
         guard let button = statusItem?.button else { return }
         
         guard let currentRun = run else {
-            // Pure Idle: GitHub Icon only
+            // Idle: GitHub Octocat icon
             stopSpinnerAnimation()
             button.image = createGitHubOctocatIcon()
             return
         }
         
-        switch currentRun.status {
-        case .inProgress:
-            // Running: Animated Spinner
+        // Case 1: Build is currently running -> Animated Spinner
+        if currentRun.status.isRunning {
+            lastKnownStatus = currentRun.status
+            lastKnownRunId = currentRun.id
             resetToIdleTimer?.invalidate()
+            resetToIdleTimer = nil
             startSpinnerAnimation()
-            
-        case .success:
-            // Successful: Show Checkmark for 5 seconds then return to GitHub Octocat icon
+            return
+        }
+        
+        // Case 2: Build JUST finished (transitioned from running to success/failure)
+        if let prev = lastKnownStatus, prev.isRunning, !currentRun.status.isRunning {
+            lastKnownStatus = currentRun.status
+            lastKnownRunId = currentRun.id
             stopSpinnerAnimation()
-            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
-            if let check = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Build Passed")?.withSymbolConfiguration(config) {
-                check.isTemplate = false
-                button.image = check
+            
+            if currentRun.status == .success {
+                let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+                if let check = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Build Passed")?.withSymbolConfiguration(config) {
+                    check.isTemplate = false
+                    button.image = check
+                }
+            } else {
+                let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+                if let cross = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Build Failed")?.withSymbolConfiguration(config) {
+                    cross.isTemplate = false
+                    button.image = cross
+                }
             }
             
+            // Show tick/cross for 5 seconds, then return to GitHub Octocat icon
             scheduleResetToIdle()
-            
-        case .failure:
-            // Failed: Show Cross for 5 seconds then return to GitHub Octocat icon
-            stopSpinnerAnimation()
-            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
-            if let cross = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Build Failed")?.withSymbolConfiguration(config) {
-                cross.isTemplate = false
-                button.image = cross
-            }
-            
-            scheduleResetToIdle()
-            
-        case .queued, .waiting:
-            stopSpinnerAnimation()
-            resetToIdleTimer?.invalidate()
-            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-            if let clock = NSImage(systemSymbolName: "clock.fill", accessibilityDescription: "Build Queued")?.withSymbolConfiguration(config) {
-                button.image = clock
-            }
-            
-        case .cancelled:
+            return
+        }
+        
+        // Case 3: Ambient Idle -> Always show GitHub Octocat icon
+        if resetToIdleTimer == nil {
             stopSpinnerAnimation()
             button.image = createGitHubOctocatIcon()
         }
+        
+        lastKnownStatus = currentRun.status
+        lastKnownRunId = currentRun.id
     }
     
     private func scheduleResetToIdle() {
@@ -110,9 +115,15 @@ public class MenuBarController: NSObject {
         resetToIdleTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self, let button = self.statusItem?.button else { return }
-                button.image = self.createGitHubOctocatIcon()
+                self.buttonToIdle()
             }
         }
+    }
+    
+    private func buttonToIdle() {
+        stopSpinnerAnimation()
+        resetToIdleTimer = nil
+        statusItem?.button?.image = createGitHubOctocatIcon()
     }
     
     private func startSpinnerAnimation() {
