@@ -9,6 +9,7 @@ public enum PushCIStatus: Equatable {
 }
 
 public struct RecentPushInfo: Equatable {
+    public var id: String
     public var repositoryName: String
     public var pushedDate: Date
     public var branch: String
@@ -34,27 +35,23 @@ public class GitHubAPIService: ObservableObject {
     private var pushDismissTimer: Timer?
     private var lastObservedRunId: Int?
     private var lastObservedStatus: WorkflowStatus?
-    private var lastHandledPushDate: Date?
-    private var hasInitializedPushBaseline: Bool = false
+    private var lastSeenPushEventId: String?
+    private var isFirstPoll: Bool = true
     
     private init() {
         requestNotificationPermission()
     }
     
     public func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            if granted {
-                print("Notifications authorized by user")
-            }
-        }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in }
     }
     
     public func startPolling(settings: AppSettings) {
         stopPolling()
         refresh(settings: settings)
         
-        // Fast 4-second polling for instant push detection
-        timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+        // Fast 3.5-second polling for real-time push detection
+        timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             if !settings.isSimulatorEnabled {
                 self.refresh(settings: settings)
@@ -73,7 +70,7 @@ public class GitHubAPIService: ObservableObject {
             token = GitHubAuthService.shared.account.token
         }
         
-        // Fallback: if token still empty, try reading from gh CLI tool directly
+        // Fallback to gh CLI token
         if token.isEmpty {
             let ghPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
             for p in ghPaths {
@@ -98,81 +95,37 @@ public class GitHubAPIService: ObservableObject {
         
         isLoading = true
         let resolvedToken = token
+        let username = !GitHubAuthService.shared.account.username.isEmpty ? GitHubAuthService.shared.account.username : settings.repoOwner
         
         Task { @MainActor in
             do {
-                var discoveredRuns: [WorkflowRun] = []
-                
-                if !resolvedToken.isEmpty {
-                    let (runs, pushInfo) = await self.fetchRecentRunsAndPushAcrossAccount(token: resolvedToken)
-                    discoveredRuns = runs
-                    
-                    if let p = pushInfo {
-                        if !self.hasInitializedPushBaseline {
-                            // Record baseline push date on startup
-                            self.lastHandledPushDate = p.pushedDate
-                            self.hasInitializedPushBaseline = true
-                        } else if let lastDate = self.lastHandledPushDate, p.pushedDate > lastDate {
-                            // NEW PUSH DETECTED!
-                            self.lastHandledPushDate = p.pushedDate
-                            var updatedPush = p
-                            updatedPush.displayedAt = Date()
-                            
-                            let repoShortName = p.repositoryName.components(separatedBy: "/").last ?? p.repositoryName
-                            let parts = p.repositoryName.components(separatedBy: "/")
-                            if parts.count == 2 {
-                                let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: resolvedToken)
-                                if repoRuns == nil {
-                                    updatedPush.ciStatus = .noWorkflowConfigured
-                                    self.sendNotification(
-                                        title: "📦 Code Synced: \(repoShortName)",
-                                        body: "Pushed to \(p.branch) • Latest commit is up to date"
-                                    )
-                                } else if repoRuns?.status.isRunning == true {
-                                    updatedPush.ciStatus = .triggering
-                                    self.sendNotification(
-                                        title: "🚀 Active Push: \(repoShortName)",
-                                        body: "Pushed to \(p.branch) • GitHub Actions workflow triggered"
-                                    )
-                                } else {
-                                    updatedPush.ciStatus = .synced
-                                    self.sendNotification(
-                                        title: "📦 Code Synced: \(repoShortName)",
-                                        body: "Pushed to \(p.branch) • Latest commit is up to date"
-                                    )
-                                }
-                            }
-                            
-                            self.recentPush = updatedPush
-                            
-                            // Automatically return to ambient idle after exactly 5.0 seconds!
-                            self.pushDismissTimer?.invalidate()
-                            self.pushDismissTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
-                                DispatchQueue.main.async {
-                                    GitHubAPIService.shared.recentPush = nil
-                                }
-                            }
-                        }
-                    }
+                // 1. Check Real-Time Push Events via GitHub Events API
+                if !resolvedToken.isEmpty && !username.isEmpty {
+                    await self.checkRealtimePushEvents(username: username, token: resolvedToken)
                 }
                 
-                // If fallback needed, query specific repo in settings
+                // 2. Fetch Recent Workflow Runs
+                var discoveredRuns: [WorkflowRun] = []
+                if !resolvedToken.isEmpty {
+                    discoveredRuns = await self.fetchRecentRunsAcrossAccount(token: resolvedToken)
+                }
+                
+                // Fallback to specific repo in settings
                 if discoveredRuns.isEmpty && !settings.repoOwner.isEmpty && !settings.repoName.isEmpty {
                     if let singleRun = await self.fetchRunForRepo(owner: settings.repoOwner, repo: settings.repoName, token: resolvedToken) {
                         discoveredRuns.append(singleRun)
                     }
                 }
                 
-                guard !discoveredRuns.isEmpty else {
+                if discoveredRuns.isEmpty {
                     self.currentRun = nil
                     self.isLoading = false
                     return
                 }
                 
-                // Priority: Pick running/queued first, otherwise the most recent run
                 let chosenRun = discoveredRuns.first(where: { $0.status.isRunning }) ?? discoveredRuns.first!
                 
-                // Fetch job steps for chosen run
+                // Fetch job steps
                 let parts = chosenRun.repositoryName.components(separatedBy: "/")
                 var finalRun = chosenRun
                 if parts.count == 2 {
@@ -191,8 +144,99 @@ public class GitHubAPIService: ObservableObject {
         }
     }
     
-    private func fetchRecentRunsAndPushAcrossAccount(token: String) async -> ([WorkflowRun], RecentPushInfo?) {
-        guard let url = URL(string: "https://api.github.com/user/repos?sort=pushed&per_page=8") else { return ([], nil) }
+    // Real-Time GitHub Push Event Stream
+    private func checkRealtimePushEvents(username: String, token: String) async {
+        guard let url = URL(string: "https://api.github.com/users/\(username)/events?per_page=5") else { return }
+        
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("macOS-CICD-Widget/1.0", forHTTPHeaderField: "User-Agent")
+        
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode),
+              let events = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return
+        }
+        
+        // Find latest PushEvent
+        guard let latestPushEvent = events.first(where: { ($0["type"] as? String) == "PushEvent" }),
+              let eventId = latestPushEvent["id"] as? String,
+              let repoDict = latestPushEvent["repo"] as? [String: Any],
+              let repoFullName = repoDict["name"] as? String else {
+            return
+        }
+        
+        let payload = latestPushEvent["payload"] as? [String: Any]
+        let rawRef = payload?["ref"] as? String ?? "refs/heads/main"
+        let branch = rawRef.replacingOccurrences(of: "refs/heads/", with: "")
+        
+        let createdAtStr = latestPushEvent["created_at"] as? String ?? ""
+        let isoFormatter = ISO8601DateFormatter()
+        let createdDate = isoFormatter.date(from: createdAtStr) ?? Date()
+        
+        if self.isFirstPoll {
+            // Store baseline event on first poll
+            self.lastSeenPushEventId = eventId
+            self.isFirstPoll = false
+            return
+        }
+        
+        if let lastId = self.lastSeenPushEventId, lastId != eventId {
+            // BRAND NEW PUSH DETECTED!
+            self.lastSeenPushEventId = eventId
+            
+            let repoShort = repoFullName.components(separatedBy: "/").last ?? repoFullName
+            let parts = repoFullName.components(separatedBy: "/")
+            var ciStatus: PushCIStatus = .triggering
+            
+            if parts.count == 2 {
+                let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: token)
+                if repoRuns == nil {
+                    ciStatus = .noWorkflowConfigured
+                    self.sendNotification(
+                        title: "📦 Code Synced: \(repoShort)",
+                        body: "Pushed to \(branch) • Latest commit is up to date"
+                    )
+                } else if repoRuns?.status.isRunning == true {
+                    ciStatus = .triggering
+                    self.sendNotification(
+                        title: "🚀 Active Push: \(repoShort)",
+                        body: "Pushed to \(branch) • GitHub Actions workflow triggered"
+                    )
+                } else {
+                    ciStatus = .synced
+                    self.sendNotification(
+                        title: "📦 Code Synced: \(repoShort)",
+                        body: "Pushed to \(branch) • Latest commit is up to date"
+                    )
+                }
+            }
+            
+            let newPushInfo = RecentPushInfo(
+                id: eventId,
+                repositoryName: repoFullName,
+                pushedDate: createdDate,
+                branch: branch,
+                ciStatus: ciStatus,
+                displayedAt: Date()
+            )
+            
+            self.recentPush = newPushInfo
+            
+            // Auto dismiss after 5 seconds
+            self.pushDismissTimer?.invalidate()
+            self.pushDismissTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
+                DispatchQueue.main.async {
+                    GitHubAPIService.shared.recentPush = nil
+                }
+            }
+        }
+    }
+    
+    private func fetchRecentRunsAcrossAccount(token: String) async -> [WorkflowRun] {
+        guard let url = URL(string: "https://api.github.com/user/repos?sort=pushed&per_page=8") else { return [] }
         
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -203,23 +247,10 @@ public class GitHubAPIService: ObservableObject {
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode),
               let repos = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return ([], nil)
+            return []
         }
         
-        // Find most recently pushed repo
-        var latestPush: RecentPushInfo? = nil
-        let isoFormatter = ISO8601DateFormatter()
-        
-        if let firstRepo = repos.first,
-           let fullName = firstRepo["full_name"] as? String,
-           let pushedAtStr = firstRepo["pushed_at"] as? String,
-           let pushedDate = isoFormatter.date(from: pushedAtStr) {
-            let defaultBranch = firstRepo["default_branch"] as? String ?? "main"
-            latestPush = RecentPushInfo(repositoryName: fullName, pushedDate: pushedDate, branch: defaultBranch)
-        }
-        
-        // Concurrently query latest run for each repo
-        let runs = await withTaskGroup(of: WorkflowRun?.self) { group in
+        return await withTaskGroup(of: WorkflowRun?.self) { group in
             for r in repos {
                 guard let fullName = r["full_name"] as? String else { continue }
                 let parts = fullName.components(separatedBy: "/")
@@ -245,8 +276,6 @@ public class GitHubAPIService: ObservableObject {
                 return r1.createdAt > r2.createdAt
             }
         }
-        
-        return (runs, latestPush)
     }
     
     private func fetchRunForRepo(owner: String, repo: String, token: String) async -> WorkflowRun? {
@@ -417,7 +446,7 @@ public class GitHubAPIService: ObservableObject {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
         
-        // 2. NSUserNotificationCenter (direct macOS notification delivery)
+        // 2. NSUserNotificationCenter
         DispatchQueue.main.async {
             let notif = NSUserNotification()
             notif.title = title
@@ -426,15 +455,14 @@ public class GitHubAPIService: ObservableObject {
             NSUserNotificationCenter.default.deliver(notif)
         }
         
-        // 3. NSAppleScript Guaranteed System Event
+        // 3. Process osascript execution (works from non-sandboxed host app)
         let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
         let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
         DispatchQueue.global(qos: .userInitiated).async {
-            let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\" sound name \"default\""
-            var error: NSDictionary?
-            if let appleScript = NSAppleScript(source: script) {
-                appleScript.executeAndReturnError(&error)
-            }
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            task.arguments = ["-e", "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\" sound name \"default\""]
+            try? task.run()
         }
     }
     
