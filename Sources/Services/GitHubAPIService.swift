@@ -1,10 +1,18 @@
 import Foundation
 import UserNotifications
 
+public enum PushCIStatus: Equatable {
+    case triggering
+    case noWorkflowConfigured
+    case synced
+}
+
 public struct RecentPushInfo: Equatable {
     public var repositoryName: String
     public var pushedDate: Date
     public var branch: String
+    public var ciStatus: PushCIStatus = .triggering
+    
     public var isVeryRecent: Bool {
         Date().timeIntervalSince(pushedDate) < 180 // Within 3 minutes
     }
@@ -60,7 +68,21 @@ public class GitHubAPIService: ObservableObject {
                 if !token.isEmpty {
                     let (runs, pushInfo) = await self.fetchRecentRunsAndPushAcrossAccount(token: token)
                     discoveredRuns = runs
-                    if let p = pushInfo {
+                    
+                    if var p = pushInfo {
+                        // Check if the pushed repo actually has any workflow runs
+                        let parts = p.repositoryName.components(separatedBy: "/")
+                        if parts.count == 2 {
+                            let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: token)
+                            if repoRuns == nil {
+                                // Repo has NO CI/CD configured
+                                p.ciStatus = .noWorkflowConfigured
+                            } else if repoRuns?.status.isRunning == true {
+                                p.ciStatus = .triggering
+                            } else {
+                                p.ciStatus = .synced
+                            }
+                        }
                         self.recentPush = p
                     }
                 }
@@ -73,7 +95,7 @@ public class GitHubAPIService: ObservableObject {
                 }
                 
                 guard !discoveredRuns.isEmpty else {
-                    self.errorMessage = "No recent workflow runs found across your repositories"
+                    self.currentRun = nil
                     self.isLoading = false
                     return
                 }
