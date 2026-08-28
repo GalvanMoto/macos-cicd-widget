@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import AppKit
 
 public enum PushCIStatus: Equatable {
     case triggering
@@ -12,9 +13,10 @@ public struct RecentPushInfo: Equatable {
     public var pushedDate: Date
     public var branch: String
     public var ciStatus: PushCIStatus = .triggering
+    public var displayedAt: Date = Date()
     
     public var isVeryRecent: Bool {
-        Date().timeIntervalSince(pushedDate) < 180 // Within 3 minutes
+        Date().timeIntervalSince(displayedAt) < 180
     }
 }
 
@@ -29,8 +31,10 @@ public class GitHubAPIService: ObservableObject {
     @Published public var lastRefreshedAt: Date?
     
     private var timer: Timer?
+    private var pushDismissTimer: Timer?
     private var lastObservedRunId: Int?
     private var lastObservedStatus: WorkflowStatus?
+    private var lastHandledPushDate: Date?
     
     private init() {
         requestNotificationPermission()
@@ -69,21 +73,38 @@ public class GitHubAPIService: ObservableObject {
                     let (runs, pushInfo) = await self.fetchRecentRunsAndPushAcrossAccount(token: token)
                     discoveredRuns = runs
                     
-                    if var p = pushInfo {
-                        // Check if the pushed repo actually has any workflow runs
-                        let parts = p.repositoryName.components(separatedBy: "/")
-                        if parts.count == 2 {
-                            let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: token)
-                            if repoRuns == nil {
-                                // Repo has NO CI/CD configured
-                                p.ciStatus = .noWorkflowConfigured
-                            } else if repoRuns?.status.isRunning == true {
-                                p.ciStatus = .triggering
-                            } else {
-                                p.ciStatus = .synced
+                    if let p = pushInfo {
+                        // Only trigger if this is a newly observed push within the last 5 minutes
+                        let isNewPush = (self.lastHandledPushDate == nil || p.pushedDate > self.lastHandledPushDate!)
+                        let isFresh = Date().timeIntervalSince(p.pushedDate) < 300
+                        
+                        if isNewPush && isFresh {
+                            self.lastHandledPushDate = p.pushedDate
+                            var updatedPush = p
+                            updatedPush.displayedAt = Date()
+                            
+                            let parts = p.repositoryName.components(separatedBy: "/")
+                            if parts.count == 2 {
+                                let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: token)
+                                if repoRuns == nil {
+                                    updatedPush.ciStatus = .noWorkflowConfigured
+                                } else if repoRuns?.status.isRunning == true {
+                                    updatedPush.ciStatus = .triggering
+                                } else {
+                                    updatedPush.ciStatus = .synced
+                                }
+                            }
+                            
+                            self.recentPush = updatedPush
+                            
+                            // Automatically return to ambient idle after exactly 5.5 seconds!
+                            self.pushDismissTimer?.invalidate()
+                            self.pushDismissTimer = Timer.scheduledTimer(withTimeInterval: 5.5, repeats: false) { _ in
+                                DispatchQueue.main.async {
+                                    GitHubAPIService.shared.recentPush = nil
+                                }
                             }
                         }
-                        self.recentPush = p
                     }
                 }
                 
@@ -338,6 +359,27 @@ public class GitHubAPIService: ObservableObject {
         }
     }
     
+    public func sendNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+        
+        // Guaranteed system fallback banner via AppleScript
+        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\""
+            var error: NSDictionary?
+            if let appleScript = NSAppleScript(source: script) {
+                appleScript.executeAndReturnError(&error)
+            }
+        }
+    }
+    
     private func checkAndNotifyStatusChange(newRun: WorkflowRun) {
         guard let prevStatus = lastObservedStatus, let prevId = lastObservedRunId else {
             lastObservedRunId = newRun.id
@@ -361,15 +403,5 @@ public class GitHubAPIService: ObservableObject {
         
         lastObservedRunId = newRun.id
         lastObservedStatus = newRun.status
-    }
-    
-    private func sendNotification(title: String, body: String) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
     }
 }
