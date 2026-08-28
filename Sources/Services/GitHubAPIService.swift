@@ -42,15 +42,19 @@ public class GitHubAPIService: ObservableObject {
     }
     
     public func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if granted {
+                print("Notifications authorized by user")
+            }
+        }
     }
     
     public func startPolling(settings: AppSettings) {
         stopPolling()
         refresh(settings: settings)
         
-        // Fast 5-second polling interval for responsive push detection
-        timer = Timer.scheduledTimer(withTimeInterval: max(5.0, settings.pollIntervalSeconds), repeats: true) { [weak self] _ in
+        // Fast 4-second polling for instant push detection
+        timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             if !settings.isSimulatorEnabled {
                 self.refresh(settings: settings)
@@ -64,20 +68,48 @@ public class GitHubAPIService: ObservableObject {
     }
     
     public func refresh(settings: AppSettings) {
-        let token = settings.githubToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        var token = settings.githubToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.isEmpty {
+            token = GitHubAuthService.shared.account.token
+        }
+        
+        // Fallback: if token still empty, try reading from gh CLI tool directly
+        if token.isEmpty {
+            let ghPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+            for p in ghPaths {
+                if FileManager.default.fileExists(atPath: p) {
+                    let task = Process()
+                    task.executableURL = URL(fileURLWithPath: p)
+                    task.arguments = ["auth", "token"]
+                    let pipe = Pipe()
+                    task.standardOutput = pipe
+                    if (try? task.run()) != nil {
+                        task.waitUntilExit()
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        if let readTok = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !readTok.isEmpty {
+                            token = readTok
+                            settings.githubToken = readTok
+                        }
+                    }
+                    break
+                }
+            }
+        }
+        
         isLoading = true
+        let resolvedToken = token
         
         Task { @MainActor in
             do {
                 var discoveredRuns: [WorkflowRun] = []
                 
-                if !token.isEmpty {
-                    let (runs, pushInfo) = await self.fetchRecentRunsAndPushAcrossAccount(token: token)
+                if !resolvedToken.isEmpty {
+                    let (runs, pushInfo) = await self.fetchRecentRunsAndPushAcrossAccount(token: resolvedToken)
                     discoveredRuns = runs
                     
                     if let p = pushInfo {
                         if !self.hasInitializedPushBaseline {
-                            // Record baseline push date on first launch
+                            // Record baseline push date on startup
                             self.lastHandledPushDate = p.pushedDate
                             self.hasInitializedPushBaseline = true
                         } else if let lastDate = self.lastHandledPushDate, p.pushedDate > lastDate {
@@ -89,7 +121,7 @@ public class GitHubAPIService: ObservableObject {
                             let repoShortName = p.repositoryName.components(separatedBy: "/").last ?? p.repositoryName
                             let parts = p.repositoryName.components(separatedBy: "/")
                             if parts.count == 2 {
-                                let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: token)
+                                let repoRuns = await self.fetchRunForRepo(owner: parts[0], repo: parts[1], token: resolvedToken)
                                 if repoRuns == nil {
                                     updatedPush.ciStatus = .noWorkflowConfigured
                                     self.sendNotification(
@@ -113,9 +145,9 @@ public class GitHubAPIService: ObservableObject {
                             
                             self.recentPush = updatedPush
                             
-                            // Automatically return to ambient idle after exactly 5.5 seconds!
+                            // Automatically return to ambient idle after exactly 5.0 seconds!
                             self.pushDismissTimer?.invalidate()
-                            self.pushDismissTimer = Timer.scheduledTimer(withTimeInterval: 5.5, repeats: false) { _ in
+                            self.pushDismissTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
                                 DispatchQueue.main.async {
                                     GitHubAPIService.shared.recentPush = nil
                                 }
@@ -126,7 +158,7 @@ public class GitHubAPIService: ObservableObject {
                 
                 // If fallback needed, query specific repo in settings
                 if discoveredRuns.isEmpty && !settings.repoOwner.isEmpty && !settings.repoName.isEmpty {
-                    if let singleRun = await self.fetchRunForRepo(owner: settings.repoOwner, repo: settings.repoName, token: token) {
+                    if let singleRun = await self.fetchRunForRepo(owner: settings.repoOwner, repo: settings.repoName, token: resolvedToken) {
                         discoveredRuns.append(singleRun)
                     }
                 }
@@ -144,7 +176,7 @@ public class GitHubAPIService: ObservableObject {
                 let parts = chosenRun.repositoryName.components(separatedBy: "/")
                 var finalRun = chosenRun
                 if parts.count == 2 {
-                    let steps = await self.fetchJobsForRun(owner: parts[0], repo: parts[1], runId: chosenRun.id, token: token)
+                    let steps = await self.fetchJobsForRun(owner: parts[0], repo: parts[1], runId: chosenRun.id, token: resolvedToken)
                     finalRun.steps = steps
                 }
                 
@@ -385,13 +417,24 @@ public class GitHubAPIService: ObservableObject {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
         
-        // 2. NSUserNotificationCenter (direct macOS notification server delivery)
+        // 2. NSUserNotificationCenter (direct macOS notification delivery)
         DispatchQueue.main.async {
             let notif = NSUserNotification()
             notif.title = title
             notif.informativeText = body
             notif.soundName = NSUserNotificationDefaultSoundName
             NSUserNotificationCenter.default.deliver(notif)
+        }
+        
+        // 3. NSAppleScript Guaranteed System Event
+        let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedBody = body.replacingOccurrences(of: "\"", with: "\\\"")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let script = "display notification \"\(escapedBody)\" with title \"\(escapedTitle)\" sound name \"default\""
+            var error: NSDictionary?
+            if let appleScript = NSAppleScript(source: script) {
+                appleScript.executeAndReturnError(&error)
+            }
         }
     }
     
