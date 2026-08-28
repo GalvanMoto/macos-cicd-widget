@@ -192,6 +192,7 @@ public class MenuBarController: NSObject {
         
         menu.addItem(NSMenuItem(title: "Show / Hide Widget", action: #selector(toggleWidget), keyEquivalent: "w"))
         menu.addItem(NSMenuItem(title: "Check Status Now", action: #selector(refreshStatus), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "Send Test Notification", action: #selector(testNotification), keyEquivalent: "t"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit CI/CD Widget", action: #selector(quitApp), keyEquivalent: "q"))
         
@@ -210,6 +211,13 @@ public class MenuBarController: NSObject {
     
     @objc private func refreshStatus() {
         GitHubAPIService.shared.refresh(settings: AppSettings.shared)
+    }
+    
+    @objc private func testNotification() {
+        GitHubAPIService.shared.sendNotification(
+            title: "🚀 Test Notification",
+            body: "GitHub CI/CD notification engine is active and working!"
+        )
     }
     
     @objc private func quitApp() {
