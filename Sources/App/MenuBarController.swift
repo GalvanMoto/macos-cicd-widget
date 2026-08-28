@@ -8,6 +8,7 @@ public class MenuBarController: NSObject {
     private var statusItem: NSStatusItem?
     private var cancellables = Set<AnyCancellable>()
     private var spinTimer: Timer?
+    private var resetToIdleTimer: Timer?
     private var spinAngle: CGFloat = 0
     
     public func setupMenuBar() {
@@ -65,10 +66,11 @@ public class MenuBarController: NSObject {
         switch currentRun.status {
         case .inProgress:
             // Running: Animated Spinner
+            resetToIdleTimer?.invalidate()
             startSpinnerAnimation()
             
         case .success:
-            // Successful: Checkmark / Tick
+            // Successful: Show Checkmark for 5 seconds then return to GitHub Octocat icon
             stopSpinnerAnimation()
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
             if let check = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Build Passed")?.withSymbolConfiguration(config) {
@@ -76,8 +78,10 @@ public class MenuBarController: NSObject {
                 button.image = check
             }
             
+            scheduleResetToIdle()
+            
         case .failure:
-            // Failed: Cross / Xmark
+            // Failed: Show Cross for 5 seconds then return to GitHub Octocat icon
             stopSpinnerAnimation()
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
             if let cross = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Build Failed")?.withSymbolConfiguration(config) {
@@ -85,8 +89,11 @@ public class MenuBarController: NSObject {
                 button.image = cross
             }
             
+            scheduleResetToIdle()
+            
         case .queued, .waiting:
             stopSpinnerAnimation()
+            resetToIdleTimer?.invalidate()
             let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
             if let clock = NSImage(systemSymbolName: "clock.fill", accessibilityDescription: "Build Queued")?.withSymbolConfiguration(config) {
                 button.image = clock
@@ -95,6 +102,16 @@ public class MenuBarController: NSObject {
         case .cancelled:
             stopSpinnerAnimation()
             button.image = createGitHubOctocatIcon()
+        }
+    }
+    
+    private func scheduleResetToIdle() {
+        resetToIdleTimer?.invalidate()
+        resetToIdleTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, let button = self.statusItem?.button else { return }
+                button.image = self.createGitHubOctocatIcon()
+            }
         }
     }
     
