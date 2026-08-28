@@ -31,10 +31,14 @@ swiftc \
   Sources/Views/PipelineGraphView.swift \
   WidgetExtension/CICDWidgetExtension.swift
 
-echo "📦 3. Packaging .app Bundle & Info.plist..."
+echo "📦 3. Packaging .app Bundle, Icons & Info.plist..."
 cp -f .build/release/CICDWidget "$APP_DIR/Contents/MacOS/CICDWidget"
 cp -f Info.plist "$APP_DIR/Contents/Info.plist"
 cp -f ExtensionInfo.plist "$PLUGINS_DIR/Contents/Info.plist"
+if [ -f "AppIcon.icns" ]; then
+  cp -f AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
+  cp -f AppIcon.png "$APP_DIR/Contents/Resources/AppIcon.png"
+fi
 
 printf "APPL????" > "$APP_DIR/Contents/PkgInfo"
 printf "XPC!????" > "$PLUGINS_DIR/Contents/PkgInfo"

@@ -8,6 +8,8 @@
     <string>GitHub CI/CD</string>
     <key>CFBundleExecutable</key>
     <string>CICDWidget</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.neonpulse.cicdwidget</string>
     <key>CFBundleInfoDictionaryVersion</key>
