@@ -57,8 +57,32 @@ echo "🔄 6. Refreshing macOS Widget Daemon (chronod)..."
 killall -9 chronod NotificationCenter 2>/dev/null || true
 sleep 1
 
-echo "✨ 7. Launching Host Application..."
+echo "🚀 7. Configuring Auto-Start on macOS Login (LaunchAgent)..."
+LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
+mkdir -p "$LAUNCH_AGENT_DIR"
+cat <<EOF > "$LAUNCH_AGENT_DIR/com.neonpulse.cicdwidget.plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.neonpulse.cicdwidget</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-a</string>
+        <string>$APP_DIR</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+EOF
+
+echo "✨ 8. Launching Host Application..."
 pkill -f CICDWidget || true
 open "$APP_DIR"
 
-echo "✅ Success! WidgetKit extension is registered."
+echo "✅ Success! Auto-start at Login configured and WidgetKit extension registered."

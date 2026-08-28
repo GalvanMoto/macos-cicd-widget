@@ -141,7 +141,27 @@ public struct SettingsView: View {
                         }
                     }
                     
-                    // SECTION 3: APPEARANCE
+                    // SECTION 3: SYSTEM & STARTUP
+                    SettingsSection(title: "SYSTEM & STARTUP") {
+                        VStack(spacing: 10) {
+                            Toggle(isOn: Binding(
+                                get: { settings.launchAtLogin },
+                                set: { settings.setLaunchAtLogin($0) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Launch at Login")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.primary)
+                                    Text("Automatically start CI/CD companion when logging in")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                        }
+                    }
+                    
+                    // SECTION 4: APPEARANCE
                     SettingsSection(title: "APPEARANCE") {
                         VStack(spacing: 12) {
                             HStack {
@@ -178,7 +198,7 @@ public struct SettingsView: View {
                         }
                     }
                     
-                    // SECTION 4: NOTIFICATIONS
+                    // SECTION 5: NOTIFICATIONS
                     SettingsSection(title: "NOTIFICATIONS & AUDIO") {
                         Toggle(isOn: $settings.soundEffectsEnabled) {
                             VStack(alignment: .leading, spacing: 1) {

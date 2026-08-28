@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UserNotifications
+import ServiceManagement
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -9,6 +10,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in }
+        
+        // Auto-start at Login registration
+        if AppSettings.shared.launchAtLogin {
+            AppSettings.shared.setLaunchAtLogin(true)
+        }
         
         MenuBarController.shared.setupMenuBar()
     }

@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import ServiceManagement
 
 public enum WidgetLayoutMode: String, CaseIterable, Codable, Identifiable {
     case compact = "Compact Pill"
@@ -19,7 +20,8 @@ public class AppSettings: ObservableObject {
     @AppStorage("isSimulatorEnabled") public var isSimulatorEnabled: Bool = false
     @AppStorage("isAutoAccountWide") public var isAutoAccountWide: Bool = true
     @AppStorage("isAlwaysOnTop") public var isAlwaysOnTop: Bool = false
-    @AppStorage("soundEffectsEnabled") public var soundEffectsEnabled: Bool = false // Disabled by default
+    @AppStorage("soundEffectsEnabled") public var soundEffectsEnabled: Bool = false
+    @AppStorage("launchAtLogin") public var launchAtLogin: Bool = true
     
     @Published public var theme: WidgetTheme = .appleSystem
     @Published public var layoutMode: WidgetLayoutMode = .pipeline
@@ -31,5 +33,24 @@ public class AppSettings: ObservableObject {
         let r = repoName.trimmingCharacters(in: .whitespaces)
         if o.isEmpty || r.isEmpty { return "" }
         return "\(o)/\(r)"
+    }
+    
+    public func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLogin = enabled
+        if #available(macOS 13.0, *) {
+            do {
+                if enabled {
+                    if SMAppService.mainApp.status != .enabled {
+                        try SMAppService.mainApp.register()
+                    }
+                } else {
+                    if SMAppService.mainApp.status == .enabled {
+                        try SMAppService.mainApp.unregister()
+                    }
+                }
+            } catch {
+                print("LaunchAtLogin SMAppService error: \(error)")
+            }
+        }
     }
 }
